@@ -78,11 +78,21 @@ class Flask(object):
         self.debug = False
         self.before_request_funcs = []     # 预处理
 
+        # todo: 待深入  # 关键依赖: werkzeug.routing.Map
+        self.url_map = Map([
+            Rule('/', endpoint='show_entries'),
+            Rule('/index', endpoint='index'),
+            Rule('/<int:year>/<int:month>/', endpoint='blog/archive'),
+            Rule('/<int:year>/<int:month>/<int:day>/', endpoint='blog/archive'),
+            Rule('/<int:year>/<int:month>/<int:day>/<slug>',
+                endpoint='blog/show_post'),
+            Rule('/about', endpoint='blog/about_me'),
+            Rule('/feeds/', endpoint='blog/feeds'),
+            Rule('/feeds/<feed_name>.rss', endpoint='blog/show_feed')
+        ])
+
         # 获取 模块包 路径, Flask() 中 引用
         self.root_path = _get_package_path(self.package_name)
-
-        # todo: 待深入
-        self.url_map = Map()    # 关键依赖: werkzeug.routing.Map
 
     # 返回响应
     def make_response(self, rv):
@@ -96,12 +106,48 @@ class Flask(object):
         """ Runs the application on a local development server.
         """
         from werkzeug import run_simple    # todo: 待深入, 关键依赖: 核心运行模块
+        if 'debug' in options: 
+            self.debug = options.pop('debug')
+        options.setdefault('use_reloader', self.debug)
+        options.setdefault('use_debugger', self.debug)
+
+        # print(options)        #{'use_debugger': True, 'use_reloader': True}
         return run_simple(host, port, self, **options)    # 关键依赖:
+
+
+    # 请求匹配
+    def match_request(self, request):
+        """ Matches the current request against the URL map and also
+        stores the endpoint and view arguments on the request object
+        is successful, otherwise the excetpion is stored.
+        """ 
+        adapter = self.url_map.bind_to_environ(request.environ)
+        # rv = _request_ctx_stack.top.url_adapter.match()
+        try:
+            endpoint, values = adapter.match()
+            print('endpoint', endpoint)
+        except HTTPException as e:
+            print('error', e)
+        
+        return endpoint
+
+
+    # 处理请求:
+    #   - 处理 路由URL 和 对应的 视图函数
+    def dispatch_request(self, request):
+        # ResponseBase('Hello World!', mimetype='text/plain')
+        endpoint = self.match_request(request)
+        f = self.view_function[endpoint]
+        r = f()
+        
+        return ResponseBase(r)
 
 
     # todo: 待深入, 对外接口:
     def wsgi_app(self, environ, start_response):
-        response = ResponseBase('Hello World!', mimetype='text/plain')
+        request = RequestBase(environ)          # <Request 'http://127.0.0.1:5000/' [GET]>
+        print('request', request)
+        response = self.dispatch_request(request)
         return response(environ, start_response)
 
 
@@ -110,25 +156,6 @@ class Flask(object):
         """Shortcut for :attr:`wsgi_app`"""
         return self.wsgi_app(environ, start_response)
         
-
-
-    # 关键接口: 创建 or 打开一个 会话(session)
-    #   - 实现方式: 使用 cookie 实现
-    #   - 默认把全部session数据, 存入一个 cookie 中.
-    #   - 对比 flask-0.4 版本, 部分重构
-    #
-    def open_session(self, request):
-        """Creates or opens a new session.
-        Default implementation stores all session data in a signed cookie.
-        This requires that the :attr:`secret_key` is set.
-
-        :param request: an instance of :attr:`request_class`.
-        """
-        pass
-        # key = self.secret_key
-        # if key is not None:
-        #     return SecureCookie.load_cookie(request, self.session_cookie_name,
-        #                                     secret_key=key)
     
     def route(self, route, **options):
         """
@@ -151,3 +178,6 @@ class Flask(object):
         return decorator
 
 
+_request_ctx_stack = LocalStack()    # 依赖 werkzeug.LocalStack 模块
+current_app = LocalProxy(lambda: _request_ctx_stack.top.app)
+request = LocalProxy(lambda: _request_ctx_stack.top.request)
