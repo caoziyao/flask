@@ -3,6 +3,7 @@
 # http://www.jianshu.com/p/7a7efbb7205f
 
 import os
+import datetime
 from werkzeug.wrappers import Request as RequestBase, Response as ResponseBase
 from werkzeug.datastructures import ImmutableDict, Headers
 from werkzeug.local import LocalStack, LocalProxy
@@ -14,6 +15,7 @@ from jinja2 import Environment, FileSystemLoader
 from werkzeug.routing import Map, Rule
 from werkzeug.exceptions import HTTPException, InternalServerError
 from werkzeug.contrib.securecookie import SecureCookie
+from itertools import chain
 
 
 class ConfigAttribute(object):
@@ -27,10 +29,10 @@ class Response(ResponseBase):
 
 
 class Request(RequestBase):
-
     endpoint = None
     view_args = None
     routing_exception = None
+
     # endpoint = view_args = routing_exception = None
 
     @property
@@ -40,13 +42,12 @@ class Request(RequestBase):
             return self.endpoint.rsplit('.', 1)[0]
 
 
-class Session():
+class Session(SecureCookie):
     pass
 
 
 class _RequestGlobals(object):
     pass
-
 
 
 # 特别注意:
@@ -70,24 +71,27 @@ class _RequestContext(object):
         # 实现了多个request context对应一个application context 的目的。
         self.app = app
         self.url_adapter = app.url_map.bind_to_environ(environ)
-        print 'app', self.app
+        # print 'app', self.app
         # request 指的是每次http请求发生时，WSGI server(比如gunicorn)调用Flask.__call__()之后，在Flask对象内部创建的Request对象；
         # 实际上是创建了一个Request对象
         # 每个http请求对应一个Request对象
         self.request = app.request_class(environ)
-        print 'request', self.request
+        # print 'request', self.request
         # 会话(session) 实现:
         self.session = app.open_session(self.request)  # 关键代码:  session: 请求上下文的 session 对象
-        print 'session', self.session
+        if self.session is None:
+            self.session = _NullSession()
+        # print 'session', self.session
         # g 实现:
         self.g = _RequestGlobals()  # g: 请求上下文的 g 对象
-        print 'g', self.g
+        # print 'g', self.g
 
         try:
-            self.request.endpoint, self.request.view_args =  self.url_adapter.match()
+            self.request.endpoint, self.request.view_args = self.url_adapter.match()
         except Exception, e:
             self.request.routing_exception = e
-#
+        #
+
     # 入栈:
     #   - 绑定 请求上下文
     #   - 把 自身所有变量, 入栈 --> 实现带上下文的 g, session
@@ -95,6 +99,7 @@ class _RequestContext(object):
     def push(self):
         """Binds the request context."""
         _request_ctx_stack.push(self)  # 全局对象: 文件末尾定义
+
     #
     # 出栈:
     #   - 输出 请求上下文
@@ -115,11 +120,47 @@ def render_template(template_name, **context):
     # yflask
     template_path = os.path.join(os.path.dirname(__file__), 'template')
     jinja_env = Environment(loader=FileSystemLoader(template_path),
-                                 autoescape=True)
+                            autoescape=True)
 
     t = jinja_env.get_template(template_name)
     return Response(t.render(context), mimetype='text/html')
 
+
+###################################################################
+#                Session 实现部分
+#
+###################################################################
+class Session(SecureCookie):
+    """Expands the session with support for switching between permanent
+    and non-permanent sessions.
+    """
+    def _get_permanent(self):
+        return self.get('_permanent', False)
+
+    def _set_permanent(self, value):
+        self['_permanent'] = bool(value)
+
+    permanent = property(_get_permanent, _set_permanent)
+    del _get_permanent, _set_permanent
+
+
+class _NullSession(Session):
+    pass
+
+
+class Config(dict):
+    def __init__(self, root_path, defaults=None):
+        dict.__init__(self, defaults or {})
+        self.root_path = root_path
+
+    def from_pyfile(self, filename):
+        pass
+
+    def from_object(self, obj):
+        pass
+
+    def __repr__(self):
+        return '<%s %s>' % (self.__class__.__name__, dict.__repr__(self))
 
 
 # core flask
@@ -159,9 +200,14 @@ class Flask():
         2. make_response
         3. process_response
         """
-        # request = RequestBase(environ)
-
-        return None
+        funcs = self.before_request_funcs.get(None, ())
+        # mod = request.module
+        # if mod and mod in self.before_request_funcs:
+        #     funcs = chain(funcs, self.before_request_funcs[mod])
+        for func in funcs:
+            rv = func()
+            if rv is not None:
+                return rv
 
     def make_response(self, rv):
         """ wsgi_app 调用
@@ -171,6 +217,8 @@ class Flask():
         """
         if isinstance(rv, self.response_class):
             return rv
+        if isinstance(rv, basestring):
+            return self.response_class(rv)
 
     def process_response(self, response):
         """ wsgi_app 调用
@@ -178,6 +226,17 @@ class Flask():
         2. make_response
         3. process_response
         """
+        ctx = _request_ctx_stack.top
+        if not isinstance(ctx.session, _NullSession):
+            self.session_cookie_name = 'session'
+            self.save_session(ctx.session, response)
+
+
+        funcs = ()
+        if None in self.after_request_funcs:
+            funcs = chain(funcs, self.after_request_funcs[None])
+        for handler in funcs:
+            response = handler(response)
         return response
 
     def dispatch_request(self):
@@ -188,13 +247,12 @@ class Flask():
         # view_functions 路由函数
         # return self.view_functions['index']()
 
-
     def wsgi_app(self, environ, start_response):
         print 'environ', environ  # headers 等内容信息
         print  'start_response', start_response  # 函数
 
         # 在Flask类中，每次请求都会调用这个request_context函数。这个函数则会创建一个_RequestContext对象。
-        with self.request_context(environ):   # 入口: 请求上下文
+        with self.request_context(environ):  # 入口: 请求上下文
 
             rv = self.preprocess_request(environ)  # 获取请求(request)
             if rv is None:
@@ -214,6 +272,7 @@ class Flask():
         self.url_map = Map()
 
         self.view_functions = {}
+        self.after_request_funcs = {}
 
         target = os.path.join(os.path.dirname(__file__), 'static')  # static 文件路径
 
@@ -221,13 +280,12 @@ class Flask():
             self.static_path: target
         })
 
-
     def add_url_rule(self, rule, endpoint=None, view_func=None, **options):
         if endpoint is None:
             endpoint = view_func.__name__
         options['endpoint'] = endpoint
         options.setdefault('methods', ('GET',))
-        self.url_map.add(Rule(rule, **options))     # 添加路由
+        self.url_map.add(Rule(rule, **options))  # 添加路由
         if view_func is not None:
             self.view_functions[endpoint] = view_func  # 视图函数集合
 
@@ -241,10 +299,15 @@ class Flask():
         def decorator(f):
             self.add_url_rule(rule, None, f, **options)
             return f
+
         return decorator
 
     def before_request(self, f):
+        self.before_request_funcs.setdefault(None, []).append(f)
+        return f
 
+    def after_request(self, f):
+        self.after_request_funcs.setdefault(None, []).append(f)
         return f
 
     #
@@ -253,12 +316,32 @@ class Flask():
     #   - 默认把全部session数据, 存入一个 cookie 中.
     #
     def open_session(self, request):
-        return ''
+        """Creates or opens a new session.  Default implementation stores all
+        session data in a signed cookie.  This requires that the
+        :attr:`secret_key` is set.
 
-    def run(self, host='127.0.0.1', port=5000, **options):
+        :param request: an instance of :attr:`request_class`.
+        """
+        key = self.secret_key
+        if key is not None:
+            return Session.load_cookie(request, self.session_cookie_name,
+                                       secret_key=key)
+
+    #
+    # 关键接口: 更新session
+    #
+    def save_session(self, session, response):
+        expires = None
+        if session.permanent:
+            expires = datetime.utcnow() + self.permanent_session_lifetime
+        session.save_cookie(response, self.session_cookie_name,  httponly=True) # expires=expires,
+
+
+    def run(self, host='127.0.0.1', port=5001, **options):
         from werkzeug import run_simple  # 局部导入: 防止
         # 浏览器请求的时候，就会调用 Flask实例，实际上是调用了 __call__ 方法
         return run_simple(host, port, self, **options)
+
 
 ###################################################################
 #               全局变量 定义部分
@@ -273,14 +356,13 @@ class Flask():
 # context locals
 _request_ctx_stack = LocalStack()
 
-
 #
 # 应用级上下文:
 #   - 应用级别: 数据隔离
 #   - 多个app之间(app1, app2), 数据是相互隔离的
 #
 current_app = LocalProxy(lambda: _request_ctx_stack.top.app)  # 应用上下文: current_app
-g = LocalProxy(lambda: _request_ctx_stack.top.g)              # 应用上下文: g 对象
+g = LocalProxy(lambda: _request_ctx_stack.top.g)  # 应用上下文: g 对象
 
 #
 # 请求级上下文:
@@ -290,14 +372,15 @@ g = LocalProxy(lambda: _request_ctx_stack.top.g)              # 应用上下文:
 request = LocalProxy(lambda: _request_ctx_stack.top.request)  # 请求上下文: request
 session = LocalProxy(lambda: _request_ctx_stack.top.session)  # 请求上下文: 会话(session)
 
-
 ###################
 
 app = Flask()
+app.secret_key = 'A0Zr98j/3yX R~XHH!jmN]LWX/,?RT'
 
 
 @app.route('/')
 def index():
+    session['mygg'] = 'hellomygg'
     return render_template('index.html')
 
 
@@ -306,6 +389,17 @@ def home():
     return render_template('home.html')
 
 
+@app.before_request
+def before():
+    print 'beforehtml'
+    # return 'hholo9eo'
+
+
+# @app.after_request
+# def after(exception):
+#     # exception: <Response 128 bytes [200 OK]>
+#     print 'after', exception
+#     return exception
+
+
 app.run()
-
-

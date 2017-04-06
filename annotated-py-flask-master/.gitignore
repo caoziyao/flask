@@ -1,5 +1,3 @@
-.idea/*
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -53,14 +51,6 @@ coverage.xml
 
 # Django stuff:
 *.log
-local_settings.py
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
 
 # Sphinx documentation
 docs/_build/
@@ -68,24 +58,52 @@ docs/_build/
 # PyBuilder
 target/
 
-# IPython Notebook
+#Ipython Notebook
 .ipynb_checkpoints
 
-# pyenv
-.python-version
 
-# celery beat schedule file
-celerybeat-schedule
+######################################
+# flask-annotated
+######################################
+.DS_Store
+*.pyc
+*.pyo
+env
+env*
+dist
+*.egg-info
+_mailinglist
+.tox
+.idea/
 
-# dotenv
-.env
 
-# virtualenv
-venv/
-ENV/
+######################################
+# flask-annotated
+######################################
 
-# Spyder project settings
-.spyderproject
+# useless files
+*AUTHORS
+*CHANGES
+*Makefile
+*LICENSE
+*README
+*setup.py
+*setup.cfg
+*MANIFEST.in
+*.ini
+*.gitmodules
+*.travis*
 
-# Rope project settings
-.ropeproject
+
+# useless folders
+*website/
+*artwork/
+*docs/
+*tests/
+*examples/
+*scripts/
+
+# 0.10.1
+*testsuite/
+
+
