@@ -16,9 +16,21 @@ from werkzeug.contrib.securecookie import SecureCookie
 from itertools import chain
 
 
+class _PackageBoundObject(object):
+    pass
 
 
-class Flask():
+class Flask(_PackageBoundObject):
 
-    def __init__(self):
-        
+    def __init__(self, import_name):
+        pass
+
+
+
+    def run(self, host='127.0.0.1', port=5000, **options):
+        from werkzeug import run_simple  # 局部导入: 防止 循环导入
+        if 'debug' in options:
+            self.debug = options.pop('debug')
+        options.setdefault('use_reloader', self.debug)
+        options.setdefault('use_debugger', self.debug)
+        return run_simple(host, port, self, **options)
